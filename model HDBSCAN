@@ -1,31 +1,17 @@
-
 import numpy as np
 import math
 import pandas as pd
-import statistics
-import matplotlib.pyplot as plt
-from matplotlib.path import Path
-from matplotlib.patches import PathPatch
-from mpl_toolkits.basemap import Basemap
 from shapely.geometry import Point, Polygon
 import matplotlib.path as mplPath
-import plotly.graph_objs as go
-from plotly.offline import plot
-import plotly.graph_objects as go
 import plotly.express as px
-from plotly.subplots import make_subplots
 from sklearn.cluster import DBSCAN
 from sklearn.cluster import KMeans
 import hdbscan
 from itertools import product
-from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score
-from sklearn.preprocessing import StandardScaler
-import pyproj
 import pymap3d as pm
 from sklearn.mixture import GaussianMixture
 from yellowbrick.cluster import KElbowVisualizer
-from sklearn.preprocessing import StandardScaler
 
 def optimal_clustering_param(data, algorithm):
     if algorithm == "DBSCAN":
@@ -46,7 +32,7 @@ def optimal_clustering_param(data, algorithm):
         return best_params
 
     elif algorithm == "KMeans":
-        k_values = list(range(2, 5))
+        k_values = list(range(2, 10))
         best_params = None
         best_score = -1
 
@@ -60,26 +46,44 @@ def optimal_clustering_param(data, algorithm):
         return best_params
 
     elif algorithm == "HDBSCAN":
-        min_cluster_size_values = list(range(2, 60))
-        min_samples_values = list(range(10, 15))
+        min_cluster_size_values = list(range(5, 100))
+        min_samples_values = list(range(2, 15))
         best_params = None
         best_score = -1
         min_outliers = float('inf')
 
-    for min_cluster_size, min_samples in product(min_cluster_size_values, min_samples_values):
-        model = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples)
-        labels = model.fit_predict(data)
-        num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
-        num_outliers = len([label for label in labels if label == -1])
+        for min_cluster_size, min_samples in product(min_cluster_size_values, min_samples_values):
+            model = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples)
+            labels = model.fit_predict(data)
+            num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+            num_outliers = len([label for label in labels if label == -1])
 
-        if num_clusters > 1:
+            if num_clusters > 1:
+                score = silhouette_score(data, labels)
+                if (num_outliers < min_outliers) or (num_outliers == min_outliers and score > best_score):
+                    best_score = score
+                    min_outliers = num_outliers
+                    best_params = {"min_cluster_size": min_cluster_size, "min_samples": min_samples}
+
+        return best_params
+
+    elif algorithm == "GMM":
+        n_components_values = list(range(1, 10))
+        best_params = None
+        best_score = -1
+
+        for n_components in n_components_values:
+            model = GaussianMixture(n_components=n_components, covariance_type='full')
+            labels = model.fit_predict(data)
             score = silhouette_score(data, labels)
-            if (num_outliers < min_outliers) or (num_outliers == min_outliers and score > best_score):
+            if score > best_score:
                 best_score = score
-                min_outliers = num_outliers
-                best_params = {"min_cluster_size": min_cluster_size, "min_samples": min_samples}
+                best_params = {"n_components": n_components}
 
-    return best_params
+        return best_params
+
+    else:
+        raise ValueError(f"Unsupported clustering algorithm: {algorithm}")
 
 def geodetic_to_ecef(latitudes, longitudes, altitudes):
     x_ecef = []
@@ -107,12 +111,34 @@ def ecef_to_geodetic(x_ecef, y_ecef, z_ecef):
 
     return latitudes, longitudes, altitudes
 
+def is_valid_new_point(new_point, existing_points, generated_points, min_height_diff=300, min_horizontal_distance=9300):
+    new_lat, new_lon, new_alt = ecef_to_geodetic([new_point[0]], [new_point[1]], [new_point[2]])
+
+    if len(generated_points)>0:
+        existing_points=np.append(existing_points, generated_points, axis=0)
+
+    for existing_point in existing_points:
+        existing_lat, existing_lon, existing_alt = ecef_to_geodetic([existing_point[0]], [existing_point[1]], [existing_point[2]])
+
+        height_diff = abs(new_alt[0] - existing_alt[0])  # Height difference in meters
+
+        if height_diff > min_height_diff:
+            return True  # Valid if height difference exceeds the threshold
+
+        horizontal_distance = math.sqrt((new_point[0] - existing_point[0]) ** 2 + (new_point[1] - existing_point[1]) ** 2)  # Horizontal distance in meters
+
+        if height_diff <= min_height_diff and horizontal_distance >= min_horizontal_distance:
+            return True  # Valid if height difference is within the threshold and horizontal distance exceeds the threshold
+
+    return False  # Not valid if no condition is met
+
+
 df = pd.read_excel("18cerven.xlsx", sheet_name='List1', usecols=["time", "icao24", "lat", "lon", "geoaltitude"],na_values=["NULL"])
-# df = pd.read_excel(r"C:\Users\matok\Desktop\příprava dat na statistiku\model HDBSCAN\POL\pol19bre-20.xlsx", sheet_name='Sheet1', usecols=["X_ECEF", "Y_ECEF", "Z_ECEF"],na_values=["NULL"])
+# df = pd.read_excel(r"C:\Users\matok\Desktop\validace\GRE\18cerven_original.xlsx", sheet_name='Sheet1', usecols=["X_ECEF", "Y_ECEF", "Z_ECEF"],na_values=["NULL"])
 
-total_points_to_add =0 # Adjust this based on your requirement
+total_points_to_add =10  # Adjust this based on your requirement
 
-# ukládání hodnot  excelu
+# importing excel values about air traffic
 time = df["time"].values
 ident = df["icao24"].values
 latit = df["lat"].values
@@ -122,11 +148,10 @@ altit = df["geoaltitude"].values
 # latit = df["X_ECEF"].values
 # longi = df["Y_ECEF"].values
 # altit = df["Z_ECEF"].values
-#
+
 # latit,longi,altit=ecef_to_geodetic(latit,longi,altit)
 
-
-# načítání excelu s daty prostorů
+# importing airspace data from excel
 df = pd.read_excel("FinalniProstoryPYT.xlsx", sheet_name='Sheet1', usecols=["aid", "lat", "lon", "seznam"])
 
 id = df["aid"].values
@@ -135,7 +160,7 @@ lon = df["lon"].values
 sez = df["seznam"].values
 sez = sez[:38]
 
-# prázdné proměnné s x,y souřadnicemi prostoru
+# empty lists for X,Y coordinates of airspaces
 airspaceLON = []
 airspaceLAT = []
 
@@ -148,7 +173,7 @@ soux = []
 souy = []
 souz = []
 
-# algoritmus pro projíždění jednotlivých prostorů a určování ze kterého prostoru bod je
+# algorithm to find from wich airspace each point is
 for i in range(0, len(sez)):
     check = sez[i]
     for j in range(0, len(id)):
@@ -177,14 +202,14 @@ for i in range(0, len(sez)):
                 airspaceLON.clear()
                 airspaceLAT.clear()
 
-# matice5 = np.column_stack((planedatID, planedatAS))
 souPuvBod = list(zip(soux, souy))
 
 polyg1 = []
 polyg2 = []
 
+# Country selector
 for j in range(0, len(id)):
-    if id[j] == "CZE":
+    if id[j] == "BEL":
         polyg1.append(lat[j])
         polyg2.append(lon[j])
 
@@ -209,29 +234,15 @@ for x in range(0, len(souPuvBod)):
 x_ecef, y_ecef, z_ecef = geodetic_to_ecef(bod1, bod2, bod3)
 
 data = np.column_stack((x_ecef, y_ecef, z_ecef))
-
-# exported_data1 = np.column_stack((data[:, 0], data[:, 1], data[:, 2]))  # Use ECEF coordinates
-# exported_df1 = pd.DataFrame(exported_data1, columns=["X_ECEF", "Y_ECEF", "Z_ECEF"])
-#
-# # Specify the output file path
-# output_file_path = r"C:\Users\matok\Desktop\puvodni body.xlsx"  # Change this to your desired file name
-#
-# # Save the DataFrame to an Excel file
-# exported_df1.to_excel(output_file_path, index=False)
-# print(f"Exported {len(exported_df1)} points to {output_file_path}")
-
-scaler = StandardScaler().fit(data)
-data_standardized = scaler.transform(data)
-
-data=data_standardized
+# data = np.column_stack((bod1, bod2, bod3))
 
 # Change the clustering algorithm to HDBSCAN
-optimal_params = optimal_clustering_param(data_standardized, "HDBSCAN")
+optimal_params = optimal_clustering_param(data, "HDBSCAN")
 print(optimal_params)
 
 # Run HDBSCAN clustering algorithm
 clusterer = hdbscan.HDBSCAN(**optimal_params, metric='euclidean')
-labels = clusterer.fit_predict(data_standardized)
+labels = clusterer.fit_predict(data)
 
 # Create a list to store cluster assignments for each point
 point_clusters = [f'Cluster: {label}' for label in labels]
@@ -245,12 +256,7 @@ new_point_indices = []
 # Create a list to store indices of removed points
 removed_point_indices = []
 
-
-
 if total_points_to_add > 0:
-    # # Calculate the number of points to add to each cluster
-    # cluster_sizes = [len(np.where(labels == label)[0]) for label in range(num_clusters)]
-    # points_to_add_per_cluster = [int(total_points_to_add * size / sum(cluster_sizes)) for size in cluster_sizes]
 
     # Calculate the minimum and maximum altitudes in the existing dataset
     min_altitude = min(bod3)
@@ -284,14 +290,12 @@ if total_points_to_add > 0:
             cluster_index = clusters_sorted_by_size[i % num_clusters]  # Cyclically assign leftover points to clusters
             points_to_generate_per_cluster[cluster_index] += 1
 
-
     # Generate new points for each cluster
     for label in range(num_clusters):
         if points_to_generate_per_cluster[label] > 0:
             cluster_indices = np.where(labels == label)[0]
             cluster_data = data[cluster_indices, :]
             gmm_cluster = GaussianMixture(n_components=1, covariance_type='full')
-            print(cluster_data.shape)
             gmm_cluster.fit(cluster_data)
 
             generated_points = []  # Store the generated points for this cluster
@@ -301,7 +305,8 @@ if total_points_to_add > 0:
                 x_ecef, y_ecef, z_ecef = new_point  # Extract x, y, and z from new_point
                 lat, lon, alt = ecef_to_geodetic([x_ecef], [y_ecef], [z_ecef])  # Pass lists as input
 
-                if min_altitude <= alt <= max_altitude:
+                # Check if the new point meets the criteria
+                if min_altitude <= alt <= max_altitude and is_valid_new_point(new_point, data, generated_points):
                     generated_points.append(new_point)
 
             # Extend the list of new points with the valid ones
@@ -319,23 +324,19 @@ elif total_points_to_add < 0:
     # Calculate the number of points to remove from each cluster proportionally
     total_points_to_remove = abs(total_points_to_add)
     points_to_remove_per_cluster = []
+    for label in range(num_clusters):
+        cluster_indices = np.where(labels == label)[0]
+        cluster_size = len(cluster_indices)
+        target_points = int(total_points_to_remove * cluster_size / len(data))
+        points_to_remove_per_cluster.append(target_points)
 
-    # Calculate the size of each cluster
-    cluster_sizes = [len(np.where(labels == label)[0]) for label in range(num_clusters)]
-
-    # Calculate the total number of points in the clusters
-    total_cluster_size = sum(cluster_sizes)
-
-    # Determine how many points to remove from each cluster
-    for cluster_size in cluster_sizes:
-        points_to_remove = int(cluster_size / total_cluster_size * total_points_to_remove)
-        points_to_remove_per_cluster.append(points_to_remove)
+    total_points_to_remove_proportional = sum(points_to_remove_per_cluster)
+    leftover = total_points_to_remove - total_points_to_remove_proportional
 
     # Create a list to store points to remove
     points_to_remove = []
 
     # Distribute the leftover points to clusters from big to small
-    leftover = total_points_to_remove - sum(points_to_remove_per_cluster)
     if leftover > 0:
         # Sort clusters by size in descending order
         clusters_sorted_by_size = sorted(range(len(points_to_remove_per_cluster)),
@@ -345,6 +346,7 @@ elif total_points_to_add < 0:
         for i in range(leftover):
             cluster_index = clusters_sorted_by_size[i % num_clusters]  # Cyclically assign leftover points to clusters
             points_to_remove_per_cluster[cluster_index] += 1
+
     # Remove points from each cluster using GMM
     for label in range(num_clusters):
         if points_to_remove_per_cluster[label] > 0:
@@ -378,6 +380,7 @@ elif total_points_to_add < 0:
     removed_point_indices = points_to_remove
 
 show_data_in_geodetic=0
+# vizualization in ECEF coordinates
 if show_data_in_geodetic==0:
     if total_points_to_add < 0:
         # Create a DataFrame to hold the data
@@ -435,7 +438,7 @@ if show_data_in_geodetic==0:
             x="x_ecef", y="y_ecef", z="z_ecef",
             color="Cluster", title="Cluster Visualization",
             labels={"x_ecef": "X", "y_ecef": "Y", "z_ecef": "Z"},
-            color_discrete_map={"New Point": "yellow", "Removed Point": "green"}
+            color_discrete_map={"New Point": "blue", "Removed Point": "green"}
         )
 
         # Customize marker sizes
@@ -443,14 +446,14 @@ if show_data_in_geodetic==0:
 
         # Show the plot
         fig.show()
-
         # Assuming 'fig' is your Plotly figure
         fig.write_html(r"C:\Users\matok\Desktop\ecef_plot.html")
         # Assuming 'fig' is your Plotly figure
         fig.write_image("interactive_plot1.png")
 
-# show_data_in_geodetic=1
 
+show_data_in_geodetic=1
+# vizualization in geodetic coordinates
 if show_data_in_geodetic==1:
     if total_points_to_add < 0:
         # Create a DataFrame to hold the data in geodetic coordinates
@@ -493,8 +496,8 @@ if show_data_in_geodetic==1:
         fig.update_traces(marker=dict(size=3))
 
         # Show the geodetic plot
-        plot(fig, filename='3d_scatter_with_black_points.html')
-    if total_points_to_add > 0:
+        fig.show()
+    if total_points_to_add >= 0:
         # Convert ECEF to geodetic coordinates for all data points
         latitudes, longitudes, altitudes = ecef_to_geodetic(data[:, 0], data[:, 1], data[:, 2])
 
@@ -525,7 +528,7 @@ if show_data_in_geodetic==1:
         )
 
         # Create a scatter plot using Plotly for geodetic coordinates
-        fig = px.scatter_3d(
+        fig1 = px.scatter_3d(
             pd.concat([df_clusters, df_new_points, df_removed_points], ignore_index=True),
             x="Longitude", y="Latitude", z="Altitude",
             color="Cluster", title="Cluster Visualization",
@@ -534,25 +537,22 @@ if show_data_in_geodetic==1:
         )
 
         # Customize marker sizes
-        fig.update_traces(marker=dict(size=3))
+        fig1.update_traces(marker=dict(size=3))
 
-        # Show the plot
-        fig.show()
-
+        # Show the geodetic plot
+        fig1.show()
         # Assuming 'fig' is your Plotly figure
-        fig.write_html(r"C:\Users\matok\Desktop\geodetic_plot.html")
+        fig1.write_html(r"C:\Users\matok\Desktop\interactive_plot.html")
         # Assuming 'fig' is your Plotly figure
-        fig.write_image("interactive_plot1.png")
+        fig1.write_image("interactive_plot.png")
 
+exported_data = np.column_stack((data[:, 0], data[:, 1], data[:, 2]))  # Use ECEF coordinates
+exported_df = pd.DataFrame(exported_data, columns=["X_ECEF", "Y_ECEF", "Z_ECEF"])
 
+# Specify the output file path
+output_file_path = r"C:\Users\matok\Desktop\pol19+20.xlsx"  # Change this to your desired file name
 
-# exported_data = np.column_stack((data[:, 0], data[:, 1], data[:, 2]))  # Use ECEF coordinates
-# exported_df = pd.DataFrame(exported_data, columns=["X_ECEF", "Y_ECEF", "Z_ECEF"])
-#
-# # Specify the output file path
-# output_file_path = r"C:\Users\matok\Desktop\ger18.xlsx"  # Change this to your desired file name
-#
-# # Save the DataFrame to an Excel file
-# exported_df.to_excel(output_file_path, index=False)
-# print(f"Exported {len(exported_df)} points to {output_file_path}")
+# Save the DataFrame to an Excel file
+exported_df.to_excel(output_file_path, index=False)
+print(f"Exported {len(exported_df)} points to {output_file_path}")
 
