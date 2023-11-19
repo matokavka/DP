@@ -1,13 +1,1 @@
-asdasdad
-asd
-a
-da
-ds
-asd
-a
-dasd
-123
-132
-123
-13
-135116518421641316432163161354436436461
+This file contains three models made for my diploma thesis. These models use different methods of clustering generate future possible distribution of air traffic based on historical data and then it is able to visualize it.
